@@ -34,3 +34,14 @@ class CustodyTamperError(ForensicOpsError):
 class VaultIntegrityError(ForensicOpsError):
     """Raised on storage or read-only permission failures inside the evidence vault."""
     pass
+
+
+class StorageError(ForensicOpsError):
+    """Raised on storage or database query/insertion errors."""
+    pass
+
+
+class CitationValidationError(ForensicOpsError):
+    """Raised when an AI-generated claim fails citation verification."""
+    pass
+

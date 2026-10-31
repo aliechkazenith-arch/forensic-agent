@@ -85,3 +85,15 @@ class CitedClaim(BaseModel):
                     f"Claim type '{self.claim_type}' requires at least one non-empty source_artifact_hash."
                 )
         return self
+
+
+class NodeGoalResult(BaseModel):
+    """Structured output result produced by an AI Goal Node, enforced via JSON Schema."""
+    node_id: str
+    status: Literal["success", "needs_more_data", "failed"] = "success"
+    summary: str
+    claims: List[CitedClaim] = Field(default_factory=list)
+    extracted_pivots: Dict[str, List[str]] = Field(default_factory=dict)
+    recommended_next_actions: List[str] = Field(default_factory=list)
+    confidence_score: float = Field(default=1.0, ge=0.0, le=1.0)
+

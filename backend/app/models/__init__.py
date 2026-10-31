@@ -5,11 +5,18 @@ from backend.app.models.custody import (
     CustodyChainEntry,
     ManifestArtifactEntry,
 )
+from backend.app.models.feedback import (
+    FeedbackScope,
+    FeedbackType,
+    HumanFeedbackRecord,
+    NodeExecutionTrace,
+)
 from backend.app.models.findings import (
     ClaimType,
     CitedClaim,
     FindingSeverity,
     ForensicFinding,
+    NodeGoalResult,
 )
 from backend.app.models.plugins import (
     DryRunAutoMapperResult,
@@ -29,6 +36,11 @@ __all__ = [
     "CitedClaim",
     "FindingSeverity",
     "ForensicFinding",
+    "NodeGoalResult",
+    "FeedbackScope",
+    "FeedbackType",
+    "HumanFeedbackRecord",
+    "NodeExecutionTrace",
     "DryRunAutoMapperResult",
     "ExecutionTier",
     "InputType",
@@ -36,3 +48,4 @@ __all__ = [
     "ToolExecutionResult",
     "ToolPluginCard",
 ]
+
