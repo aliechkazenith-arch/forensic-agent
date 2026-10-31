@@ -1,0 +1,49 @@
+tool_id: ez_evtxecmd
+name: Eric Zimmerman EvtxECmd
+version: "1.5.0"
+description: Fast, deterministic Windows Event Log (.evtx) parser mapping security, system, and application events.
+author: ForensicOps AI
+category: event_log
+supported_artifact_types:
+  - evtx
+  - event_log
+execution_tier: tier_b_adapter
+command_template:
+  - EvtxECmd.exe
+  - -f
+  - "{input_path}"
+  - --json
+  - "{output_dir}"
+container_image: ghcr.io/forensicops/ez-tools:latest
+input_type: file
+output_format: jsonl
+field_map:
+  TimeCreated: timestamp_utc
+  EventId: event_id
+  Computer: host
+  UserName: user
+  ExecutableInfo: process_name
+  CommandLine: command_line
+  RecordNumber: raw_reference
+  Payload: summary
+ai_keep_fields:
+  - TimeCreated
+  - EventId
+  - Computer
+  - UserName
+  - ExecutableInfo
+  - CommandLine
+  - ParentProcessName
+  - ParentCommandLine
+  - Payload
+default_severity: info
+severity_field: EventId
+severity_map:
+  "1102": critical
+  "4688": low
+  "4625": medium
+  "7045": high
+  "4697": high
+  "4720": medium
+  "4728": medium
+timeout_seconds: 300

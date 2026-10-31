@@ -1,0 +1,45 @@
+tool_id: chainsaw_sigma
+name: WithSecure Chainsaw Sigma Engine
+version: "2.10.0"
+description: Fast standalone Sigma detection engine hunting across Windows Event Logs (.evtx) using Sigma rules.
+author: ForensicOps AI
+category: sigma_detection
+supported_artifact_types:
+  - evtx
+  - event_log
+execution_tier: tier_b_adapter
+command_template:
+  - chainsaw
+  - hunt
+  - "{input_path}"
+  - --rules
+  - rules/
+  - --json
+container_image: ghcr.io/forensicops/chainsaw:latest
+input_type: file
+output_format: json
+field_map:
+  timestamp: timestamp_utc
+  id: event_id
+  computer: host
+  author: user
+  name: summary
+  level: severity
+ai_keep_fields:
+  - timestamp
+  - name
+  - level
+  - id
+  - computer
+  - tags
+  - document
+  - status
+default_severity: medium
+severity_field: level
+severity_map:
+  critical: critical
+  high: high
+  medium: medium
+  low: low
+  informational: info
+timeout_seconds: 300

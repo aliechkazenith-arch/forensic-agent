@@ -1,0 +1,39 @@
+tool_id: volatility3_pslist
+name: Volatility 3 Windows PsList
+version: "2.7.0"
+description: Volatility 3 memory analysis plugin listing active and unlinked Windows processes from memory dumps.
+author: ForensicOps AI
+category: memory
+supported_artifact_types:
+  - memory_dump
+  - raw_memory
+  - dmp
+  - lime
+execution_tier: tier_b_adapter
+command_template:
+  - vol
+  - -f
+  - "{input_path}"
+  - -r
+  - json
+  - windows.pslist
+container_image: ghcr.io/forensicops/volatility3:latest
+input_type: file
+output_format: json
+field_map:
+  CreateTime: timestamp_utc
+  PID: raw_reference
+  ImageFileName: process_name
+  Offset(V): summary
+  Threads: category
+ai_keep_fields:
+  - PID
+  - PPID
+  - ImageFileName
+  - CreateTime
+  - ExitTime
+  - SessionId
+  - Wow64
+default_severity: info
+severity_field: Wow64
+timeout_seconds: 600

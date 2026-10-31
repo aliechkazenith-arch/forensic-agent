@@ -1,0 +1,46 @@
+tool_id: ez_recmd
+name: Eric Zimmerman RECmd
+version: "1.4.0"
+description: Windows Registry command-line parser and batch runner for persistence, execution, and configuration hives.
+author: ForensicOps AI
+category: registry
+supported_artifact_types:
+  - registry
+  - hive
+  - system
+  - software
+  - ntuser
+  - sam
+execution_tier: tier_b_adapter
+command_template:
+  - RECmd.exe
+  - -f
+  - "{input_path}"
+  - --json
+  - "{output_dir}"
+container_image: ghcr.io/forensicops/ez-tools:latest
+input_type: file
+output_format: jsonl
+field_map:
+  LastWriteTimestamp: timestamp_utc
+  KeyPath: raw_reference
+  ValueName: summary
+  ValueData: command_line
+  Category: category
+  HiveName: host
+ai_keep_fields:
+  - LastWriteTimestamp
+  - KeyPath
+  - ValueName
+  - ValueData
+  - Category
+  - HiveName
+  - Comment
+default_severity: info
+severity_field: Category
+severity_map:
+  Persistence: high
+  UserExecution: medium
+  Services: medium
+  DefenseEvasion: high
+timeout_seconds: 300

@@ -1,0 +1,44 @@
+tool_id: yara_scanner
+name: YARA Signature Scanner
+version: "4.5.0"
+description: Multi-platform pattern matching swiss army knife scanning files and memory dumps for malware signatures.
+author: ForensicOps AI
+category: yara_scan
+supported_artifact_types:
+  - binary
+  - blob
+  - file
+  - memory_dump
+  - all
+execution_tier: tier_b_adapter
+command_template:
+  - yara
+  - -s
+  - -j
+  - "{rules_path}"
+  - "{input_path}"
+container_image: ghcr.io/forensicops/yara:latest
+input_type: file
+output_format: json
+field_map:
+  rule: summary
+  target: raw_reference
+  tags: category
+  namespace: host
+ai_keep_fields:
+  - rule
+  - namespace
+  - tags
+  - meta
+  - strings
+  - target
+default_severity: high
+severity_field: tags
+severity_map:
+  apt: critical
+  ransomware: critical
+  backdoor: high
+  c2: high
+  dropper: medium
+  suspicious: low
+timeout_seconds: 300
