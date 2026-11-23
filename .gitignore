@@ -33,8 +33,21 @@ vault/
 *.db-wal
 *.db-shm
 audit.jsonl
+backend/data/evidence_intake/*
+!backend/data/evidence_intake/.gitkeep
 
 .venv
 env/
 venv/
 ENV/
+.env
+*.env
+
+# Local artifacts, caches & archives
+.audit/
+graphify-out/
+.agents/
+codebase_clean.zip
+tmp_test_vault/
+*.log
+

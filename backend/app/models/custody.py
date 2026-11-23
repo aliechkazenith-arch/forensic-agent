@@ -33,6 +33,10 @@ class ArtifactRecord(BaseModel):
         default_factory=lambda: datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
     )
     acquisition_method: str
+    original_name: Optional[str] = None
+    actor: Optional[str] = None
+    custody_seq_id: Optional[int] = None
+    verification_status: str = "VERIFIED"
 
 
 class CustodyChainEntry(BaseModel):

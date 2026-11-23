@@ -45,3 +45,83 @@ class CitationValidationError(ForensicOpsError):
     """Raised when an AI-generated claim fails citation verification."""
     pass
 
+
+class ConnectorError(ForensicOpsError):
+    """Base exception for online collector and SIEM connector errors."""
+    pass
+
+
+class UnauthorizedCollectorExecutionError(ConnectorError, PermissionError):
+    """Raised when an online collector action is attempted without a valid HumanApprovalToken."""
+    pass
+
+
+class ReadOnlyViolationError(ConnectorError):
+    """Raised when a query or connector action attempts a mutating operation."""
+    pass
+
+
+class SSRFSecurityError(ConnectorError, ValueError):
+    """Raised when a remote collector target or SIEM endpoint violates SSRF boundaries."""
+    pass
+
+
+class SIEMQueryError(ConnectorError):
+    """Raised when a SIEM query execution fails or returns an error."""
+    pass
+
+
+class ExecutionPolicyError(ForensicOpsError):
+    """Raised when a tool, binary, image, argument, or resource request violates the execution policy."""
+    pass
+
+
+class SandboxUnavailableError(ForensicOpsError):
+    """Raised when the required container sandbox is unavailable and host fallback is rejected (fail-closed)."""
+    pass
+
+
+class ProcessTimeoutError(ForensicOpsError):
+    """Raised when process execution times out and process trees are terminated."""
+    pass
+
+
+class UnsafePluginCardError(ForensicOpsError):
+    """Raised when a plugin card fails validation against safety invariants."""
+    pass
+
+
+class CredentialEncryptionError(ForensicOpsError):
+    """Raised on credential encryption, decryption, key configuration, or integrity failures."""
+    pass
+
+
+class CryptographicTamperError(CredentialEncryptionError):
+    """Raised when cryptographic authentication fails (e.g., AEAD tag mismatch, HMAC chain break, or tampered ciphertext)."""
+    pass
+
+
+class RegistryParserError(ForensicOpsError):
+    """Base exception for Windows Registry hive parsing errors."""
+    pass
+
+
+class RegistryInvalidSignatureError(RegistryParserError):
+    """Raised when file signature is not 'regf'."""
+    pass
+
+
+class RegistryCorruptedError(RegistryParserError):
+    """Raised when a Registry hive base block, hive bin, cell, or offset is corrupted or malformed."""
+    pass
+
+
+class RegistryTruncatedError(RegistryParserError):
+    """Raised when a Registry hive file is truncated before expected blocks or cells."""
+    pass
+
+
+class RegistryResourceLimitError(RegistryParserError):
+    """Raised when Registry hive parsing exceeds configured resource limits (size, keys, depth, timeout)."""
+    pass
+

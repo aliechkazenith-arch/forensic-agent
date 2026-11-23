@@ -1,0 +1,1 @@
+{"timestamp_utc": "2026-11-20T10:02:30Z", "process_name": "updater.exe", "pid": 4120, "src_ip": "10.0.0.45", "src_port": 49182, "dest_ip": "198.51.100.45", "dest_port": 4444, "protocol": "TCP", "state": "ESTABLISHED", "host": "WS-CORP-FINANCE"}

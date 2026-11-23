@@ -17,6 +17,7 @@ from backend.app.models.findings import (
     FindingSeverity,
     ForensicFinding,
     NodeGoalResult,
+    HypothesisDraft,
 )
 from backend.app.models.plugins import (
     DryRunAutoMapperResult,
@@ -26,6 +27,28 @@ from backend.app.models.plugins import (
     ToolExecutionResult,
     ToolPluginCard,
 )
+from backend.app.models.connectors import (
+    SIEMConnectionConfig,
+    SIEMQuerySnapshot,
+    SIEMType,
+)
+from backend.app.models.cases import (
+    CaseCreatePayload,
+    CaseReadDTO,
+    CaseShareResponse,
+    CaseStatus,
+    CaseUpdatePayload,
+)
+from backend.app.models.workflow import (
+    HumanApprovalToken,
+    NodeType,
+    WorkflowDefinition,
+    WorkflowEdge,
+    WorkflowEdgePayload,
+    WorkflowExecutionState,
+    WorkflowNode,
+)
+
 
 __all__ = [
     "ArtifactRecord",
@@ -37,6 +60,7 @@ __all__ = [
     "FindingSeverity",
     "ForensicFinding",
     "NodeGoalResult",
+    "HypothesisDraft",
     "FeedbackScope",
     "FeedbackType",
     "HumanFeedbackRecord",
@@ -47,5 +71,21 @@ __all__ = [
     "OutputFormat",
     "ToolExecutionResult",
     "ToolPluginCard",
+    "HumanApprovalToken",
+    "NodeType",
+    "WorkflowDefinition",
+    "WorkflowEdge",
+    "WorkflowEdgePayload",
+    "WorkflowExecutionState",
+    "WorkflowNode",
+    "SIEMConnectionConfig",
+    "SIEMQuerySnapshot",
+    "SIEMType",
+    "CaseCreatePayload",
+    "CaseReadDTO",
+    "CaseShareResponse",
+    "CaseStatus",
+    "CaseUpdatePayload",
 ]
+
 

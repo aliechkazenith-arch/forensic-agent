@@ -18,6 +18,11 @@ dependencies = [
     "langgraph",
     "pytest",
     "pytest-asyncio",
+    "python-jose[cryptography]",
+    "passlib[bcrypt]",
+    "bcrypt",
+    "python-multipart",
+    "urllib3>=2.3.0",
 ]
 
 [tool.setuptools.packages.find]

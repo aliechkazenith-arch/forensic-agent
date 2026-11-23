@@ -15,10 +15,13 @@ from backend.app.core.exceptions import (
     VaultIntegrityError,
     ZipSlipError,
 )
+from backend.app.core.config import Settings, get_settings
 from backend.app.core.plugin_runner import AirGappedSubprocessRunner, PluginRunner
 from backend.app.core.storage import ForensicStore
 
 __all__ = [
+    "Settings",
+    "get_settings",
     "ForensicOpsError",
     "ZipSlipError",
     "SuspiciousArchiveError",

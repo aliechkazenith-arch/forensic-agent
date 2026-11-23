@@ -24,6 +24,35 @@ Execute this build in **6 sequential, self-tested phases**. After completing eac
 - **Verification:** Run `pytest backend/tests/test_phase1_custody.py -v` (test valid intake, hash mismatch rejection, Zip Slip blocking, and custody chain tamper detection).
 
 ---
+### Phase 1.5: JWT Authentication & Multi-User Role-Based Access Control (RBAC)
+- **Read First:** `AGENTS.md`, `specs/02-UI-SPECIFICATION.md`, `specs/03-SECURITY-AUDIT-AND-THREAT-MODEL.md`
+- **Deliverables:**
+  1. `backend/app/auth/models.py`, `backend/app/auth/security.py`, `backend/app/auth/store.py`, `backend/app/auth/dependencies.py`:
+     - Three non-overlapping DFIR roles: `lead_investigator`, `soc_analyst`, and `auditor`.
+     - Direct `bcrypt` password hashing (with safe 72-byte truncation) + `python-jose` HS256 JWT access token generation and validation.
+     - SQLite `users` table (`vault/users.db`) storing `id`, `username`, `badge_id`, `password_hash`, `role`, `full_name`, `is_active`, `created_at`.
+     - Fast, dependency-injected `get_current_user` and `require_roles(*allowed_roles)` security guards.
+  2. `backend/app/api/auth.py` Router:
+     - `GET /api/auth/status`: Returns system setup status (`initialized: bool`, active accounts count).
+     - `POST /api/auth/setup`: First-boot Lead Investigator creation (permitted ONLY when `users` table is empty; rejected with HTTP 403 thereafter).
+     - `POST /api/auth/login`: Authenticates username or badge_id + password, returns JWT bearer token + investigator metadata.
+     - `GET /api/auth/me`: Verifies active JWT session and returns current investigator profile.
+     - `GET /api/auth/users`: Lists all investigator accounts (`lead_investigator` only).
+     - `POST /api/auth/users`: Creates new `soc_analyst` or `auditor` accounts (`lead_investigator` only).
+     - `PATCH /api/auth/users/{user_id}/status`: Activates or suspends an investigator account (`lead_investigator` only).
+  3. **Forensic Identity Ledger & Feedback Binding:**
+     - In `backend/app/api/intake.py` and workflow executions, inject authenticated user identity into every `CustodyChainEntry` so `actor` is permanently recorded as:
+       `f"{user.username} ({user.badge_id}) [{user.role}]"`
+     - Update `backend/app/models/feedback.py` & `backend/app/agent/memory_protocol.py` (`human_feedback` SQLite table) to store `badge_id`, `analyst_role`, and `analyst_username`.
+     - In `POST /api/feedback`, auto-populate `badge_id`, `analyst_role`, and `analyst_username` from `current_user`.
+  4. **Frontend AuthGate & RBAC UI (`frontend/src/`):**
+     - `frontend/src/types/auth.ts`: Data types for user profiles, roles, and auth tokens.
+     - `frontend/src/context/AuthContext.tsx`: React Context provider managing JWT storage, active investigator session, case assignment, and sign-out.
+     - `frontend/src/components/AuthGate.tsx`: First-Boot Lead Account creation form OR Investigator Login Card with Badge ID/Username + Password, followed by Case Selection.
+     - `frontend/src/components/UserManagementModal.tsx`: Account creation and suspension modal for Lead Investigators.
+     - `frontend/src/components/Navbar.tsx`: Top Navigation Identity Bar showing Badge ID, Role chip (`LEAD`, `SOC ANALYST`, `AUDITOR`), Manage Users button, and Sign Out.
+     - Role-Aware UI Guards across `WorkflowCanvas.tsx` (disable node editing & hide "Run Workflow" for `auditor`; gate online collection for `soc_analyst`) and `CitedReportViewer.tsx`.
+- **Verification:** Run `pytest backend/tests/test_phase1_5_auth_rbac.py -v` (testing first-boot setup, login, JWT validation, role-based 403 blocks, custody actor chaining, and feedback identity tracking).
 
 ### Phase 2: Two-Tier Parsing (`Dissect` + YAML Tool Adapters), Dry-Run Auto-Mapper & Column Projection
 - **Read First:** `AGENTS.md`, `specs/03-SECURITY-AUDIT-AND-THREAT-MODEL.md`, `specs/04-TOOL-ADAPTERS-AND-WORKFLOW.md`

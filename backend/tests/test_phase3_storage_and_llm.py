@@ -30,12 +30,15 @@ from backend.app.agent.memory_protocol import (
     KnowledgeAndMemoryProvider,
     SQLiteFeedbackMemoryProvider,
 )
-from backend.app.agent.ollama_client import (
-    OllamaClient,
+from backend.app.agent.lmstudio_client import (
+    LMStudioClient,
     build_forensic_system_prompt,
+    clean_json_markdown,
     wrap_untrusted_evidence,
 )
+from backend.app.agent.ollama_client import OllamaClient
 from backend.app.core.citation_guard import CitationGuard, CitationValidationReport
+from backend.app.core.config import get_settings
 from backend.app.core.exceptions import CitationValidationError, StorageError
 from backend.app.core.storage import ForensicStore
 from backend.app.models.feedback import HumanFeedbackRecord, NodeExecutionTrace
@@ -563,3 +566,232 @@ async def test_end_to_end_store_llm_citation_workflow(memory_store, sample_findi
     assert report.verified_finding_ids == ["fnd-002"]
     assert len(report.valid_claims) == 1
     assert "powershell" in report.valid_claims[0].statement.lower()
+
+
+def test_lmstudio_client_initialization_and_config():
+    """Test LMStudioClient pulls default settings from centralized config."""
+    settings = get_settings()
+    client = LMStudioClient()
+    assert client.base_url == settings.openai_api_base_url.rstrip("/")
+    assert client.api_key == settings.openai_api_key
+    assert client.model == settings.openai_model
+    assert client.timeout == settings.llm_timeout
+
+    # Test custom overrides
+    custom = LMStudioClient(
+        base_url="http://custom-host:8080/v1",
+        api_key="custom-key",
+        model="custom-forensic-model",
+        timeout=120.0,
+        mock_mode=True,
+    )
+    assert custom.base_url == "http://custom-host:8080/v1"
+    assert custom.api_key == "custom-key"
+    assert custom.model == "custom-forensic-model"
+    assert custom.timeout == 120.0
+    assert custom.mock_mode is True
+
+
+def test_lmstudio_clean_json_markdown():
+    """Test clean_json_markdown strips code blocks properly."""
+    raw = "```json\n{\"key\": \"val\"}\n```"
+    assert clean_json_markdown(raw) == "{\"key\": \"val\"}"
+
+    raw_plain = "```\n{\"key\": \"val\"}\n```"
+    assert clean_json_markdown(raw_plain) == "{\"key\": \"val\"}"
+
+    raw_no_fence = "  {\"key\": \"val\"}  "
+    assert clean_json_markdown(raw_no_fence) == "{\"key\": \"val\"}"
+
+
+@pytest.mark.asyncio
+async def test_lmstudio_client_mock_mode_structured_generation(sample_findings):
+    """Test LMStudioClient mock mode generates valid NodeGoalResult with verified citations."""
+    client = LMStudioClient(mock_mode=True)
+    res = await client.generate_node_goal_result(
+        node_id="lmstudio_test_01",
+        user_goal="Audit suspicious process creation",
+        evidence=sample_findings,
+        incoming_pivots={"host": "WS-CORP-01"},
+    )
+    assert isinstance(res, NodeGoalResult)
+    assert res.node_id == "lmstudio_test_01"
+    assert res.status == "success"
+    assert len(res.claims) >= 1
+    assert res.claims[0].claim_type == "observed_fact"
+    assert res.claims[0].citing_finding_ids == [sample_findings[0].finding_id]
+    assert res.claims[0].source_artifact_hashes == [sample_findings[0].source_artifact_hash]
+
+
+@pytest.mark.asyncio
+async def test_lmstudio_client_http_completion_mock(sample_findings):
+    """Test LMStudioClient correctly parses standard OpenAI completion JSON."""
+    from unittest.mock import AsyncMock, MagicMock, patch
+
+    client = LMStudioClient(mock_mode=False)
+    f0 = sample_findings[0]
+
+    mock_content = {
+        "node_id": "http_node_01",
+        "status": "success",
+        "summary": "Successful authentication identified",
+        "claims": [
+            {
+                "claim_id": "claim-auth-01",
+                "claim_type": "observed_fact",
+                "statement": f"Observed logon by {f0.user}",
+                "citing_finding_ids": [f0.finding_id],
+                "source_artifact_hashes": [f0.source_artifact_hash],
+                "confidence": 1.0,
+            }
+        ],
+        "extracted_pivots": {"users": [f0.user]},
+        "recommended_next_actions": ["Trace subsequent process spawns."],
+        "confidence_score": 1.0,
+    }
+
+    payload = {
+        "id": "chatcmpl-12345",
+        "object": "chat.completion",
+        "created": 1700000000,
+        "model": "local-model",
+        "choices": [
+            {
+                "index": 0,
+                "message": {
+                    "role": "assistant",
+                    "content": json.dumps(mock_content),
+                },
+                "finish_reason": "stop",
+            }
+        ],
+    }
+
+    with patch("httpx.AsyncClient.post", new_callable=AsyncMock) as mock_post:
+        mock_resp = AsyncMock()
+        mock_resp.status_code = 200
+        mock_resp.raise_for_status = MagicMock()
+        mock_resp.json = lambda: payload
+        mock_post.return_value = mock_resp
+
+        res = await client.generate_node_goal_result(
+            node_id="http_node_01",
+            user_goal="Audit auth events",
+            evidence=[f0],
+        )
+
+        assert res.node_id == "http_node_01"
+        assert res.status == "success"
+        assert len(res.claims) == 1
+        assert res.claims[0].statement == f"Observed logon by {f0.user}"
+        assert res.claims[0].citing_finding_ids == [f0.finding_id]
+
+        # Verify thin proxy architecture: no temperature, top_p, top_k, or system prompt
+        sent_payload = mock_post.call_args.kwargs["json"]
+        assert "temperature" not in sent_payload
+        assert "top_p" not in sent_payload
+        assert "top_k" not in sent_payload
+        assert all(m["role"] != "system" for m in sent_payload["messages"])
+        assert any(m["role"] == "user" for m in sent_payload["messages"])
+
+
+@pytest.mark.asyncio
+async def test_lmstudio_client_markdown_wrapped_completion(sample_findings):
+    """Test LMStudioClient parses completions wrapped in markdown codeblocks."""
+    from unittest.mock import AsyncMock, MagicMock, patch
+
+    client = LMStudioClient(mock_mode=False)
+    f0 = sample_findings[0]
+
+    mock_content = {
+        "node_id": "http_node_md",
+        "status": "success",
+        "summary": "Markdown wrapped test passed",
+        "claims": [
+            {
+                "claim_id": "claim-md-01",
+                "claim_type": "observed_fact",
+                "statement": "Markdown wrapped content",
+                "citing_finding_ids": [f0.finding_id],
+                "source_artifact_hashes": [f0.source_artifact_hash],
+                "confidence": 1.0,
+            }
+        ],
+        "extracted_pivots": {},
+        "recommended_next_actions": [],
+        "confidence_score": 1.0,
+    }
+
+    payload = {
+        "choices": [
+            {
+                "message": {
+                    "role": "assistant",
+                    "content": f"```json\n{json.dumps(mock_content)}\n```",
+                }
+            }
+        ]
+    }
+
+    with patch("httpx.AsyncClient.post", new_callable=AsyncMock) as mock_post:
+        mock_resp = AsyncMock()
+        mock_resp.raise_for_status = MagicMock()
+        mock_resp.json = lambda: payload
+        mock_post.return_value = mock_resp
+
+        res = await client.generate_node_goal_result(
+            node_id="http_node_md",
+            user_goal="Check markdown",
+            evidence=[f0],
+        )
+
+        assert res.node_id == "http_node_md"
+        assert res.summary == "Markdown wrapped test passed"
+        assert len(res.claims) == 1
+
+
+@pytest.mark.asyncio
+async def test_lmstudio_citation_guard_e2e(memory_store, sample_findings):
+    """Test full pipeline: Findings in store -> LMStudioClient -> CitationGuard validation."""
+    memory_store.insert_findings(sample_findings)
+    guard = CitationGuard(memory_store)
+
+    client = LMStudioClient(mock_mode=True)
+    res = await client.generate_node_goal_result(
+        node_id="e2e_lmstudio_node",
+        user_goal="Audit suspicious activity",
+        evidence=[sample_findings[0]],
+    )
+
+    report = guard.validate_node_result(res, case_id="case-100", strict=True)
+    assert report.is_valid is True
+    assert sample_findings[0].finding_id in report.verified_finding_ids
+    assert len(report.valid_claims) == 1
+    assert len(report.rejected_claims) == 0
+
+
+@pytest.mark.asyncio
+async def test_lmstudio_thin_proxy_chat_completion_method():
+    """Verify chat_completion acts as a thin proxy forwarding messages without injecting parameters."""
+    from unittest.mock import AsyncMock, MagicMock, patch
+
+    client = LMStudioClient(mock_mode=False)
+    with patch("httpx.AsyncClient.post", new_callable=AsyncMock) as mock_post:
+        mock_resp = AsyncMock()
+        mock_resp.status_code = 200
+        mock_resp.raise_for_status = MagicMock()
+        mock_resp.json = lambda: {"choices": [{"message": {"role": "assistant", "content": "pong"}}]}
+        mock_post.return_value = mock_resp
+
+        messages = [{"role": "user", "content": "ping"}]
+        res = await client.chat_completion(messages=messages)
+
+        assert res["choices"][0]["message"]["content"] == "pong"
+        sent_payload = mock_post.call_args.kwargs["json"]
+        assert "temperature" not in sent_payload
+        assert "top_p" not in sent_payload
+        assert "top_k" not in sent_payload
+        assert len(sent_payload["messages"]) == 1
+        assert sent_payload["messages"][0]["role"] == "user"
+
+

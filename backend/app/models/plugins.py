@@ -86,3 +86,15 @@ class ToolExecutionResult(BaseModel):
     stderr: str = ""
     execution_time_seconds: float = 0.0
     source_artifact_hash: str = ""
+    tool_version: Optional[str] = None
+    binary_digest: Optional[str] = None
+    container_image: Optional[str] = None
+    container_image_digest: Optional[str] = None
+    parameters: List[str] = Field(default_factory=list)
+    started_at_utc: Optional[str] = None
+    finished_at_utc: Optional[str] = None
+    input_artifact_hash: str = ""
+    output_hashes: Dict[str, str] = Field(default_factory=dict)
+    warnings: List[str] = Field(default_factory=list)
+    errors: List[str] = Field(default_factory=list)
+    resource_metrics: Dict[str, Any] = Field(default_factory=dict)

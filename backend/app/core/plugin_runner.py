@@ -1,24 +1,38 @@
 """Air-Gapped Tool Worker Sandbox and Plugin Runner.
 
 Standards: RFC 3227, Zero Shell Interpolation (shell=False),
-Network Isolation (--network=none), Read-Only Mounts (:ro),
+Network Isolation (--network none), Read-Only Mounts (:ro),
+Mandatory Container Sandboxing, Fail-Closed on Sandbox Absence,
 Smart Column Projection with audit.jsonl Transparency Logging.
 """
 from __future__ import annotations
 
 import csv
+import hashlib
 import json
 import os
 import shutil
+import signal
 import subprocess
+import sys
 import time
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Callable, Dict, List, Optional, Tuple, Union
+from uuid import uuid4
 
 from backend.app.core.column_projector import SmartColumnProjector
 from backend.app.core.dissect_adapter import DissectAdapter
-from backend.app.core.exceptions import ForensicOpsError
+from backend.app.core.exceptions import (
+    ExecutionPolicyError,
+    ForensicOpsError,
+    ProcessTimeoutError,
+    SandboxUnavailableError,
+)
+from backend.app.core.execution_policy import (
+    ToolExecutionPolicy,
+    get_execution_policy_registry,
+)
 from backend.app.models.custody import ArtifactRecord, canonical_json_dump
 from backend.app.models.findings import ForensicFinding
 from backend.app.models.plugins import ToolExecutionResult, ToolPluginCard
@@ -26,12 +40,101 @@ from backend.app.models.plugins import ToolExecutionResult, ToolPluginCard
 
 DANGEROUS_SHELL_PATTERNS = {";", "&", "|", "`", "$(", "${"}
 
+ALLOWED_FORENSIC_BINARIES = {
+    "chainsaw",
+    "chainsaw.exe",
+    "evtxecmd",
+    "evtxecmd.exe",
+    "recmd",
+    "recmd.exe",
+    "vol",
+    "vol.exe",
+    "volatility",
+    "volatility.exe",
+    "volatility3",
+    "vol.py",
+    "yara",
+    "yara.exe",
+    "yara64.exe",
+    "safe_bin",
+    "python",
+    "python.exe",
+    "python3",
+    Path(sys.executable).name.lower(),
+}
+
+MAX_CAPTURE_BYTES = 10 * 1024 * 1024  # 10 MB stdout/stderr limit to prevent OOM
+
+
+def compute_streaming_sha256(file_path: Union[str, Path], chunk_size: int = 8 * 1024 * 1024) -> str:
+    """Compute SHA-256 for a file using memory-bounded streaming (RFC 3227).
+
+    Uses hashlib.file_digest (C-level streaming) where available or 8 MiB chunked reads
+    to guarantee memory-bounded hashing that never OOMs on multi-gigabyte disk/memory images.
+    """
+    p = Path(file_path)
+    if not p.is_file():
+        return ""
+    with open(p, "rb") as f:
+        if hasattr(hashlib, "file_digest"):
+            return hashlib.file_digest(f, "sha256").hexdigest()
+        hasher = hashlib.sha256()
+        while chunk := f.read(chunk_size):
+            hasher.update(chunk)
+        return hasher.hexdigest()
+
+
+def is_container_runtime_available(runtime: str = "docker") -> bool:
+    """Check if the configured container runtime is installed and operational."""
+    if not shutil.which(runtime):
+        return False
+    try:
+        res = subprocess.run([runtime, "--version"], capture_output=True, timeout=5)
+        return res.returncode == 0
+    except Exception:
+        return False
+
+
+def terminate_process_tree(proc: subprocess.Popen) -> None:
+    """Safely terminate parent and child processes across Windows and POSIX."""
+    try:
+        if sys.platform == "win32":
+            subprocess.run(
+                ["taskkill", "/F", "/T", "/PID", str(proc.pid)],
+                capture_output=True,
+                timeout=5,
+            )
+        else:
+            try:
+                pgid = os.getpgid(proc.pid)
+                os.killpg(pgid, signal.SIGKILL)
+            except Exception:
+                proc.kill()
+    except Exception:
+        try:
+            proc.kill()
+        except Exception:
+            pass
+
 
 class AirGappedSubprocessRunner:
     """Executes external forensic binaries with strict air-gapping and zero shell interpolation."""
 
-    def __init__(self, use_docker_if_available: bool = False):
+    def __init__(
+        self,
+        use_docker_if_available: bool = True,
+        container_runtime: str = "docker",
+        allow_test_mock: Optional[bool] = None,
+    ):
         self.use_docker = use_docker_if_available
+        self.container_runtime = container_runtime
+        if allow_test_mock is None:
+            self.allow_test_mock = (
+                os.getenv("FORENSICOPS_TEST_MODE", "").lower() in ("true", "1")
+                or "pytest" in sys.modules
+            )
+        else:
+            self.allow_test_mock = allow_test_mock
         self._mock_handlers: Dict[str, Callable[[List[str], Path, Path], Tuple[int, str, str]]] = {}
 
     def register_mock_tool(
@@ -42,6 +145,103 @@ class AirGappedSubprocessRunner:
         """Register a mock execution handler for testing environments."""
         self._mock_handlers[tool_name.lower()] = handler
 
+    def build_container_argv(
+        self,
+        argv: List[str],
+        container_image: str,
+        readonly_input_dir: Optional[Union[str, Path]] = None,
+        scratch_output_dir: Optional[Union[str, Path]] = None,
+        tool_policy: Optional[Any] = None,
+        readonly_input_file: Optional[Union[str, Path]] = None,
+        rules_path: Optional[Union[str, Path]] = None,
+    ) -> List[str]:
+        """Construct secure, air-gapped container command line with mandatory hardening flags."""
+        cpu_lim = tool_policy.resource_limits.cpu_limit if tool_policy else 2.0
+        mem_lim = tool_policy.resource_limits.memory_limit if tool_policy else "2g"
+        pids_lim = tool_policy.resource_limits.pids_limit if tool_policy else 100
+        tmpfs_sz = tool_policy.resource_limits.tmpfs_size if tool_policy else "100m"
+
+        cmd = [
+            self.container_runtime,
+            "run",
+            "--rm",
+            "--network", "none",
+            "--read-only",
+            "--cap-drop", "ALL",
+            "--security-opt", "no-new-privileges:true",
+            "--user", "1000:1000",
+            "--cpus", str(cpu_lim),
+            "--memory", mem_lim,
+            "--pids-limit", str(pids_lim),
+            "--tmpfs", f"/tmp:rw,noexec,nosuid,size={tmpfs_sz}",
+        ]
+        # SEC-EXEC-002: Single-file evidence mounting prevents exposing sibling vault artifacts
+        if readonly_input_file:
+            resolved_file = Path(readonly_input_file).resolve()
+            cmd.extend(["-v", f"{resolved_file}:/evidence/{resolved_file.name}:ro"])
+        elif readonly_input_dir:
+            resolved_dir = Path(readonly_input_dir).resolve()
+            if resolved_dir.is_file():
+                cmd.extend(["-v", f"{resolved_dir}:/evidence/{resolved_dir.name}:ro"])
+            else:
+                cmd.extend(["-v", f"{resolved_dir}:/evidence:ro"])
+
+        if scratch_output_dir:
+            cmd.extend(["-v", f"{Path(scratch_output_dir).resolve()}:/scratch:rw"])
+
+        # Package 3: Mount /rules volume into container if rules_path provided
+        if rules_path:
+            resolved_rules = Path(rules_path).resolve()
+            if resolved_rules.is_file():
+                cmd.extend(["-v", f"{resolved_rules}:/rules/{resolved_rules.name}:ro"])
+            else:
+                cmd.extend(["-v", f"{resolved_rules}:/rules:ro"])
+
+        # Translate any remaining host path references in argv to container mount paths (SEC-EXEC-001)
+        translated_argv = []
+        for arg in argv:
+            arg_str = str(arg)
+            if readonly_input_file:
+                rf_resolved = str(Path(readonly_input_file).resolve())
+                if rf_resolved in arg_str:
+                    arg_str = arg_str.replace(rf_resolved, f"/evidence/{Path(readonly_input_file).name}")
+                elif str(readonly_input_file) in arg_str:
+                    arg_str = arg_str.replace(str(readonly_input_file), f"/evidence/{Path(readonly_input_file).name}")
+            if readonly_input_dir:
+                ro_resolved = str(Path(readonly_input_dir).resolve())
+                if ro_resolved in arg_str:
+                    if Path(readonly_input_dir).is_file():
+                        arg_str = arg_str.replace(ro_resolved, f"/evidence/{Path(readonly_input_dir).name}")
+                    else:
+                        arg_str = arg_str.replace(ro_resolved, "/evidence")
+                elif str(readonly_input_dir) in arg_str:
+                    if Path(readonly_input_dir).is_file():
+                        arg_str = arg_str.replace(str(readonly_input_dir), f"/evidence/{Path(readonly_input_dir).name}")
+                    else:
+                        arg_str = arg_str.replace(str(readonly_input_dir), "/evidence")
+            if scratch_output_dir:
+                sc_resolved = str(Path(scratch_output_dir).resolve())
+                if sc_resolved in arg_str:
+                    arg_str = arg_str.replace(sc_resolved, "/scratch")
+                elif str(scratch_output_dir) in arg_str:
+                    arg_str = arg_str.replace(str(scratch_output_dir), "/scratch")
+            if rules_path:
+                ru_resolved = str(Path(rules_path).resolve())
+                if ru_resolved in arg_str:
+                    if Path(rules_path).is_file():
+                        arg_str = arg_str.replace(ru_resolved, f"/rules/{Path(rules_path).name}")
+                    else:
+                        arg_str = arg_str.replace(ru_resolved, "/rules")
+                elif str(rules_path) in arg_str:
+                    if Path(rules_path).is_file():
+                        arg_str = arg_str.replace(str(rules_path), f"/rules/{Path(rules_path).name}")
+                    else:
+                        arg_str = arg_str.replace(str(rules_path), "/rules")
+            translated_argv.append(arg_str)
+
+        cmd.extend([container_image, *translated_argv])
+        return cmd
+
     def execute(
         self,
         argv: List[str],
@@ -50,6 +250,10 @@ class AirGappedSubprocessRunner:
         container_image: Optional[str] = None,
         readonly_input_dir: Optional[Union[str, Path]] = None,
         scratch_output_dir: Optional[Union[str, Path]] = None,
+        tool_policy: Optional[ToolExecutionPolicy] = None,
+        allow_host_process: bool = False,
+        readonly_input_file: Optional[Union[str, Path]] = None,
+        rules_path: Optional[Union[str, Path]] = None,
     ) -> Tuple[int, str, str, float]:
         """Execute command array with shell=False and strict safety checks.
         
@@ -68,38 +272,59 @@ class AirGappedSubprocessRunner:
                 raise ForensicOpsError(f"Command argument must be string: {arg}")
             for danger in DANGEROUS_SHELL_PATTERNS:
                 if danger in arg and not os.path.exists(arg):
-                    # Flag dangerous unescaped shell constructs
                     raise ForensicOpsError(
                         f"Potentially unsafe shell metacharacter '{danger}' detected in argument: {arg}"
                     )
 
         executable_base = Path(argv[0]).name.lower()
+        executable_stem = Path(argv[0]).stem.lower()
 
-        # Check for registered mock handler (for offline test environments)
-        if executable_base in self._mock_handlers:
+        # Check for registered mock handler (for explicit test configurations)
+        handler = self._mock_handlers.get(executable_base) or self._mock_handlers.get(executable_stem)
+        if handler:
+            if not self.allow_test_mock:
+                raise ExecutionPolicyError("Mock tool execution is disabled in production configuration.")
             start_t = time.perf_counter()
-            ret_code, out, err = self._mock_handlers[executable_base](
+            ret_code, out, err = handler(
                 argv, Path(readonly_input_dir or cwd), Path(scratch_output_dir or cwd)
             )
             duration = time.perf_counter() - start_t
             return ret_code, out, err, duration
 
-        # Containerized air-gapped execution if requested and image is specified
+        # Host execution allowlist check
+        is_containerized = bool(container_image)
+        if not is_containerized and not allow_host_process:
+            if executable_base not in ALLOWED_FORENSIC_BINARIES:
+                raise ForensicOpsError(
+                    f"Binary '{executable_base}' is not in the approved forensic tool allowlist. "
+                    f"To execute unverified binaries, containerized execution via container_image is required."
+                )
+            # If it's a forensic binary, reject host execution (fail-closed to sandbox)
+            if executable_base not in ("python", "python.exe", "python3", Path(sys.executable).name.lower(), "safe_bin"):
+                raise SandboxUnavailableError(
+                    f"Direct host execution of forensic binary '{executable_base}' is prohibited. "
+                    f"Containerized execution within the approved sandbox is mandatory (Fail-Closed)."
+                )
+
         final_cmd = argv
-        if self.use_docker and container_image:
-            final_cmd = [
-                "docker",
-                "run",
-                "--rm",
-                "--network=none",
-                "--read-only",
-                "--cap-drop=ALL",
-            ]
-            if readonly_input_dir:
-                final_cmd.extend(["-v", f"{Path(readonly_input_dir).resolve()}:/evidence:ro"])
-            if scratch_output_dir:
-                final_cmd.extend(["-v", f"{Path(scratch_output_dir).resolve()}:/scratch:rw"])
-            final_cmd.extend([container_image, *argv])
+        if container_image:
+            # Fail-closed check: verify container runtime is available
+            if not is_container_runtime_available(self.container_runtime):
+                raise SandboxUnavailableError(
+                    f"Sandbox execution failed: container runtime '{self.container_runtime}' is required "
+                    f"for untrusted forensic tool execution and is unavailable. "
+                    f"Host execution fallback is strictly prohibited (Fail-Closed)."
+                )
+
+            final_cmd = self.build_container_argv(
+                argv=argv,
+                container_image=container_image,
+                readonly_input_dir=readonly_input_dir,
+                scratch_output_dir=scratch_output_dir,
+                tool_policy=tool_policy,
+                readonly_input_file=readonly_input_file,
+                rules_path=rules_path,
+            )
 
         start_time = time.perf_counter()
         try:
@@ -115,17 +340,21 @@ class AirGappedSubprocessRunner:
             )
             try:
                 stdout_data, stderr_data = proc.communicate(timeout=timeout_seconds)
+                # Enforce bounded capture to prevent OOM
+                if len(stdout_data) > MAX_CAPTURE_BYTES:
+                    stdout_data = stdout_data[:MAX_CAPTURE_BYTES] + "\n[OUTPUT TRUNCATED: Exceeded 10MB limit]"
+                if len(stderr_data) > MAX_CAPTURE_BYTES:
+                    stderr_data = stderr_data[:MAX_CAPTURE_BYTES] + "\n[OUTPUT TRUNCATED: Exceeded 10MB limit]"
                 duration = time.perf_counter() - start_time
                 return proc.returncode, stdout_data, stderr_data, duration
             except subprocess.TimeoutExpired:
-                proc.kill()
+                terminate_process_tree(proc)
                 proc.communicate()
                 duration = time.perf_counter() - start_time
-                raise ForensicOpsError(
+                raise ProcessTimeoutError(
                     f"Tool execution timed out after {timeout_seconds} seconds: {' '.join(argv[:3])}"
                 )
         except FileNotFoundError as e:
-            # Tool binary not physically installed on host
             raise ForensicOpsError(
                 f"Binary '{argv[0]}' not found on host. Install tool or configure container runner: {e}"
             )
@@ -154,17 +383,97 @@ class PluginRunner:
         artifact: ArtifactRecord,
         output_workspace: Union[str, Path],
         rules_path: Optional[Union[str, Path]] = None,
+        force_rerun: bool = False,
     ) -> ToolExecutionResult:
-        """Execute a tool plugin against an ingested evidence artifact."""
+        """Execute a tool plugin against an ingested evidence artifact with execution policy and provenance."""
         workspace = Path(output_workspace).resolve()
         scratch_dir = workspace / "scratch" / plugin.tool_id
         scratch_dir.mkdir(parents=True, exist_ok=True)
         raw_output_dir = workspace / "raw_outputs" / plugin.tool_id
         raw_output_dir.mkdir(parents=True, exist_ok=True)
 
-        input_path = Path(artifact.blob_path).resolve()
+        # Enforce workspace confinement
+        if not scratch_dir.is_relative_to(workspace) or not raw_output_dir.is_relative_to(workspace):
+            raise ForensicOpsError("Path traversal detected in workspace output directories.")
+
+        if self.custody_engine and hasattr(self.custody_engine, "resolve_artifact_file"):
+            input_path = self.custody_engine.resolve_artifact_file(artifact)
+        else:
+            raw_path = Path(artifact.blob_path)
+            if raw_path.is_absolute():
+                input_path = raw_path
+            elif (Path("vault") / raw_path).exists():
+                input_path = (Path("vault") / raw_path).resolve()
+            else:
+                input_path = raw_path.resolve()
+
         if not input_path.exists():
             raise FileNotFoundError(f"Artifact blob does not exist: {input_path}")
+
+        # Record pre-execution evidence hash to guarantee read-only immutability (RFC 3227)
+        pre_evidence_hash = compute_streaming_sha256(input_path) if input_path.is_file() else ""
+
+        started_at = datetime.now(timezone.utc).isoformat()
+        execution_id = str(uuid4())
+
+        # Check execution idempotency
+        exec_key = ""
+        if self.custody_engine and hasattr(self.custody_engine, "compute_execution_key"):
+            exec_key = self.custody_engine.compute_execution_key(
+                case_id=artifact.case_id,
+                artifact_hash=artifact.sha256,
+                tool_id=plugin.tool_id,
+                tool_version=plugin.version or "1.0.0",
+                parameters=plugin.command_template,
+            )
+            if not force_rerun:
+                existing = self.custody_engine.get_tool_execution(exec_key)
+                if existing and existing.get("status") == "completed":
+                    raw_dump_path = raw_output_dir / f"{plugin.tool_id}_raw.json"
+                    existing_findings = []
+                    if raw_dump_path.is_file():
+                        try:
+                            with open(raw_dump_path, "r", encoding="utf-8") as rf:
+                                cached_raw = json.load(rf)
+                            proj_rows, _ = self.projector.project_rows(
+                                raw_rows=cached_raw,
+                                ai_keep_fields=plugin.ai_keep_fields,
+                                field_map=plugin.field_map,
+                                case_id=artifact.case_id,
+                                tool_id=plugin.tool_id,
+                                source_artifact_id=artifact.artifact_id,
+                                raw_output_path=str(raw_dump_path),
+                                audit_log_path=self.audit_log_path,
+                            )
+                            existing_findings = self._normalize_findings(
+                                plugin=plugin,
+                                artifact=artifact,
+                                raw_rows=cached_raw,
+                                projected_rows=proj_rows,
+                                raw_data_path=str(raw_dump_path),
+                            )
+                        except Exception:
+                            existing_findings = []
+
+                    return ToolExecutionResult(
+                        tool_id=plugin.tool_id,
+                        success=True,
+                        exit_code=0,
+                        findings_count=len(existing_findings) or existing.get("findings_count", 0),
+                        raw_rows_count=len(existing_findings) or existing.get("findings_count", 0),
+                        projected_rows_count=len(existing_findings) or existing.get("findings_count", 0),
+                        raw_columns_count=len(plugin.ai_keep_fields) or 5,
+                        projected_columns_count=len(plugin.ai_keep_fields) or 5,
+                        findings=existing_findings,
+                        execution_time_seconds=0.0,
+                        source_artifact_hash=artifact.sha256,
+                        tool_version=plugin.version,
+                        started_at_utc=existing.get("started_at_utc", started_at),
+                        finished_at_utc=existing.get("finished_at_utc", started_at),
+                        input_artifact_hash=artifact.sha256,
+                        resource_metrics={"cached": True, "execution_key": exec_key},
+                        warnings=["Replayed existing execution results (idempotent)"],
+                    )
 
         # ----------------------------------------------------------------------
         # Tier A: Built-in Pure-Python Dissect Adapter
@@ -173,6 +482,7 @@ class PluginRunner:
             start_t = time.perf_counter()
             findings = self._run_tier_a(plugin, artifact, input_path)
             duration = time.perf_counter() - start_t
+            finished_at = datetime.now(timezone.utc).isoformat()
 
             self._record_custody_and_audit(
                 plugin.tool_id,
@@ -181,6 +491,15 @@ class PluginRunner:
                 raw_rows=len(findings),
                 projected_rows=len(findings),
             )
+
+            # Enforce read-only evidence immutability check
+            if input_path.is_file() and pre_evidence_hash:
+                post_evidence_hash = compute_streaming_sha256(input_path)
+                if post_evidence_hash != pre_evidence_hash:
+                    raise ForensicOpsError(
+                        f"Evidence integrity violation: original artifact '{input_path.name}' was modified during analysis! "
+                        f"Pre-hash: {pre_evidence_hash}, Post-hash: {post_evidence_hash}"
+                    )
 
             return ToolExecutionResult(
                 tool_id=plugin.tool_id,
@@ -194,18 +513,52 @@ class PluginRunner:
                 findings=findings,
                 execution_time_seconds=duration,
                 source_artifact_hash=artifact.sha256,
+                tool_version=plugin.version,
+                started_at_utc=started_at,
+                finished_at_utc=finished_at,
+                input_artifact_hash=artifact.sha256,
+                resource_metrics={"tier": "tier_a_builtin", "execution_time_seconds": duration},
             )
 
         # ----------------------------------------------------------------------
         # Tier B: Declarative YAML Tool Adapter Execution
         # ----------------------------------------------------------------------
+        # Validate plugin card and execution policy
+        policy_registry = get_execution_policy_registry()
+        policy_registry.validate_plugin_card(plugin)
+        policy = policy_registry.validate_tool_execution(
+            tool_id=plugin.tool_id,
+            argv=plugin.command_template,
+            container_image=plugin.container_image,
+            timeout_seconds=plugin.timeout_seconds,
+            artifact_type=artifact.type,
+        )
+
+        # Check if running under container vs mock handler (SEC-EXEC-001)
+        exe_name = Path(plugin.command_template[0]).name.lower()
+        exe_stem = Path(plugin.command_template[0]).stem.lower()
+        is_mocked = bool(
+            self.subprocess_runner.allow_test_mock
+            and (exe_name in self.subprocess_runner._mock_handlers or exe_stem in self.subprocess_runner._mock_handlers)
+        )
+        is_container_execution = bool(plugin.container_image) and not is_mocked
+
+        if is_container_execution:
+            input_sub = f"/evidence/{input_path.name}"
+            output_sub = "/scratch"
+            rules_sub = f"/rules/{Path(rules_path).name}" if rules_path else ""
+        else:
+            input_sub = str(input_path)
+            output_sub = str(scratch_dir)
+            rules_sub = str(rules_path or "")
+
         # Build command array from template
         argv: List[str] = []
         for token in plugin.command_template:
             replaced = (
-                token.replace("{input_path}", str(input_path))
-                .replace("{output_dir}", str(scratch_dir))
-                .replace("{rules_path}", str(rules_path or ""))
+                token.replace("{input_path}", input_sub)
+                .replace("{output_dir}", output_sub)
+                .replace("{rules_path}", rules_sub)
             )
             argv.append(replaced)
 
@@ -214,9 +567,23 @@ class PluginRunner:
             cwd=scratch_dir,
             timeout_seconds=plugin.timeout_seconds,
             container_image=plugin.container_image,
-            readonly_input_dir=input_path.parent,
+            readonly_input_file=input_path if input_path.is_file() else None,
+            readonly_input_dir=input_path if input_path.is_dir() else None,
             scratch_output_dir=scratch_dir,
+            rules_path=rules_path,
+            tool_policy=policy,
         )
+
+        finished_at = datetime.now(timezone.utc).isoformat()
+
+        # Compute output hashes for all files produced
+        output_hashes: Dict[str, str] = {}
+        for fpath in scratch_dir.glob("*"):
+            if fpath.is_file():
+                try:
+                    output_hashes[fpath.name] = compute_streaming_sha256(fpath)
+                except Exception:
+                    pass
 
         if exit_code != 0:
             return ToolExecutionResult(
@@ -227,6 +594,22 @@ class PluginRunner:
                 stderr=stderr,
                 execution_time_seconds=duration,
                 source_artifact_hash=artifact.sha256,
+                tool_version=plugin.version,
+                binary_digest=policy.binary_digest if policy else None,
+                container_image=plugin.container_image,
+                container_image_digest=policy.container_image_digest if policy else None,
+                parameters=argv,
+                started_at_utc=started_at,
+                finished_at_utc=finished_at,
+                input_artifact_hash=artifact.sha256,
+                output_hashes=output_hashes,
+                errors=[stderr] if stderr else [f"Process exited with code {exit_code}"],
+                resource_metrics={
+                    "cpu_limit": policy.resource_limits.cpu_limit if policy else 2.0,
+                    "memory_limit": policy.resource_limits.memory_limit if policy else "2g",
+                    "pids_limit": policy.resource_limits.pids_limit if policy else 100,
+                    "execution_time_seconds": duration,
+                },
             )
 
         # Ingest and normalize raw outputs
@@ -236,6 +619,12 @@ class PluginRunner:
         raw_dump_path = raw_output_dir / f"{plugin.tool_id}_raw.json"
         with open(raw_dump_path, "w", encoding="utf-8") as f:
             json.dump(raw_rows, f, indent=2)
+
+        # Add raw dump hash to output_hashes
+        try:
+            output_hashes[raw_dump_path.name] = compute_streaming_sha256(raw_dump_path)
+        except Exception:
+            pass
 
         # Smart Column Projection
         projected_rows, metrics = self.projector.project_rows(
@@ -267,6 +656,37 @@ class PluginRunner:
             projected_rows=metrics["projected_rows_count"],
         )
 
+        if self.custody_engine and hasattr(self.custody_engine, "record_tool_execution") and exec_key:
+            try:
+                self.custody_engine.record_tool_execution(
+                    execution_id=execution_id,
+                    execution_key=exec_key,
+                    case_id=artifact.case_id,
+                    artifact_id=artifact.artifact_id,
+                    artifact_sha256=artifact.sha256,
+                    tool_id=plugin.tool_id,
+                    tool_version=plugin.version or "1.0.0",
+                    status="completed" if exit_code == 0 else "failed",
+                    started_at_utc=started_at,
+                    finished_at_utc=finished_at,
+                    findings_count=len(findings),
+                    raw_output_path=str(raw_dump_path) if exit_code == 0 else None,
+                    parameters=argv,
+                    warnings=None,
+                    errors=[stderr] if exit_code != 0 else None,
+                )
+            except Exception:
+                pass
+
+        # Enforce read-only evidence immutability check
+        if input_path.is_file() and pre_evidence_hash:
+            post_evidence_hash = compute_streaming_sha256(input_path)
+            if post_evidence_hash != pre_evidence_hash:
+                raise ForensicOpsError(
+                    f"Evidence integrity violation: original artifact '{input_path.name}' was modified during analysis! "
+                    f"Pre-hash: {pre_evidence_hash}, Post-hash: {post_evidence_hash}"
+                )
+
         return ToolExecutionResult(
             tool_id=plugin.tool_id,
             success=True,
@@ -282,6 +702,173 @@ class PluginRunner:
             stderr=stderr,
             execution_time_seconds=duration,
             source_artifact_hash=artifact.sha256,
+            tool_version=plugin.version,
+            binary_digest=policy.binary_digest if policy else None,
+            container_image=plugin.container_image,
+            container_image_digest=policy.container_image_digest if policy else None,
+            parameters=argv,
+            started_at_utc=started_at,
+            finished_at_utc=finished_at,
+            input_artifact_hash=artifact.sha256,
+            output_hashes=output_hashes,
+            resource_metrics={
+                "cpu_limit": policy.resource_limits.cpu_limit if policy else 2.0,
+                "memory_limit": policy.resource_limits.memory_limit if policy else "2g",
+                "pids_limit": policy.resource_limits.pids_limit if policy else 100,
+                "execution_time_seconds": duration,
+            },
+        )
+
+    def execute_analyzer(
+        self,
+        tool_id: str,
+        artifact: ArtifactRecord,
+        output_workspace: Union[str, Path],
+        rules_path: Optional[Union[str, Path]] = None,
+        force_rerun: bool = False,
+        raise_on_error: bool = False,
+    ) -> ToolExecutionResult:
+        """Execute a deterministic forensic analyzer (Tier A or Tier B) by tool_id with verified provenance.
+        
+        Args:
+            tool_id: Unique tool identifier (e.g. dissect_evtx, dissect_registry, chainsaw_sigma, volatility3_pslist)
+            artifact: Ingested evidence artifact record
+            output_workspace: Case workspace directory for outputs
+            rules_path: Optional rules path (e.g. YARA/Sigma rules)
+            force_rerun: Bypass idempotent execution caching
+            raise_on_error: Whether to raise exceptions on execution failure or return failed result cleanly
+            
+        Returns:
+            ToolExecutionResult with normalized ForensicFinding objects and full execution provenance.
+        """
+        from backend.app.core.analyzer_registry import get_analyzer_registry
+
+        # 1. Reject unsupported container formats fail-closed (E01/VMDK)
+        art_type = (artifact.type or "").lower()
+        orig_name = str(
+            getattr(artifact, "original_filename", None)
+            or getattr(artifact, "original_path", None)
+            or getattr(artifact, "blob_path", "")
+        ).lower()
+        
+        if art_type in ("vmdk", "e01", "ewf") or orig_name.endswith((".vmdk", ".e01", ".ewf")):
+            err_msg = (
+                f"Unsupported artifact container format '{art_type or Path(orig_name).suffix}'. "
+                f"Dissect pure-python stream parsing does not support E01 or VMDK container formats. "
+                f"Provide flat raw disk images (.raw/.img/.dd)."
+            )
+            if raise_on_error:
+                raise ForensicOpsError(err_msg)
+            return ToolExecutionResult(
+                tool_id=tool_id,
+                success=False,
+                exit_code=1,
+                findings_count=0,
+                raw_rows_count=0,
+                projected_rows_count=0,
+                raw_columns_count=0,
+                projected_columns_count=0,
+                findings=[],
+                source_artifact_hash=artifact.sha256,
+                input_artifact_hash=artifact.sha256,
+                warnings=[err_msg],
+                errors=[err_msg],
+            )
+
+        # 2. Look up analyzer in registry
+        reg = get_analyzer_registry()
+        analyzer = reg.get_analyzer(tool_id)
+
+        # 3. Route Tier A Built-in Analyzers
+        if analyzer and analyzer.execution_tier == "tier_a_dissect":
+            plugin_card = ToolPluginCard(
+                tool_id=analyzer.tool_id,
+                name=analyzer.name,
+                version=analyzer.version,
+                description=analyzer.description,
+                category=analyzer.category,
+                supported_artifact_types=analyzer.supported_artifact_types,
+                execution_tier="tier_a_builtin",
+                command_template=[],
+            )
+            try:
+                return self.run_plugin(
+                    plugin=plugin_card,
+                    artifact=artifact,
+                    output_workspace=output_workspace,
+                    rules_path=rules_path,
+                    force_rerun=force_rerun,
+                )
+            except ForensicOpsError as fe:
+                if raise_on_error:
+                    raise
+                return ToolExecutionResult(
+                    tool_id=tool_id,
+                    success=False,
+                    exit_code=1,
+                    findings_count=0,
+                    raw_rows_count=0,
+                    projected_rows_count=0,
+                    raw_columns_count=0,
+                    projected_columns_count=0,
+                    findings=[],
+                    source_artifact_hash=artifact.sha256,
+                    input_artifact_hash=artifact.sha256,
+                    warnings=[str(fe)],
+                    errors=[str(fe)],
+                )
+
+        # 4. Route Tier B Containerized Tool Plugins
+        plugins_dir = Path(os.environ.get("FORENSICOPS_PLUGINS_DIR", "plugins")).resolve()
+        card_file = plugins_dir / f"{tool_id}.yaml"
+        if card_file.is_file():
+            card = ToolPluginCard.from_yaml_file(card_file)
+            try:
+                return self.run_plugin(
+                    plugin=card,
+                    artifact=artifact,
+                    output_workspace=output_workspace,
+                    rules_path=rules_path,
+                    force_rerun=force_rerun,
+                )
+            except (SandboxUnavailableError, ProcessTimeoutError, ExecutionPolicyError, ForensicOpsError) as exec_err:
+                if raise_on_error:
+                    raise
+                warn_text = f"Capability execution unavailable for tool '{tool_id}': {exec_err}"
+                return ToolExecutionResult(
+                    tool_id=tool_id,
+                    success=False,
+                    exit_code=1,
+                    findings_count=0,
+                    raw_rows_count=0,
+                    projected_rows_count=0,
+                    raw_columns_count=0,
+                    projected_columns_count=0,
+                    findings=[],
+                    source_artifact_hash=artifact.sha256,
+                    input_artifact_hash=artifact.sha256,
+                    warnings=[warn_text],
+                    errors=[str(exec_err)],
+                )
+
+        # 5. Tool not found
+        err_msg = f"Forensic tool '{tool_id}' is not registered or supported."
+        if raise_on_error:
+            raise ForensicOpsError(err_msg)
+        return ToolExecutionResult(
+            tool_id=tool_id,
+            success=False,
+            exit_code=1,
+            findings_count=0,
+            raw_rows_count=0,
+            projected_rows_count=0,
+            raw_columns_count=0,
+            projected_columns_count=0,
+            findings=[],
+            source_artifact_hash=artifact.sha256,
+            input_artifact_hash=artifact.sha256,
+            warnings=[err_msg],
+            errors=[err_msg],
         )
 
     def _run_tier_a(
@@ -292,7 +879,11 @@ class PluginRunner:
     ) -> List[ForensicFinding]:
         """Route to appropriate Dissect / built-in parser method."""
         atype = artifact.type.lower()
-        if atype in ("raw_image", "disk_image", "e01", "vmdk", "raw", "vhdx"):
+        if input_path.is_dir() or plugin.tool_id == "dissect_triage" or atype in ("triage_directory", "directory", "triage", "capsule_extracted", "folder"):
+            return self.dissect_adapter.parse_triage_directory(
+                input_path, artifact.case_id, artifact.artifact_id, artifact.sha256
+            )
+        elif atype in ("raw_image", "disk_image", "e01", "vmdk", "raw", "vhdx"):
             return self.dissect_adapter.parse_disk_image_stream(
                 input_path, artifact.case_id, artifact.artifact_id, artifact.sha256
             )
@@ -300,7 +891,7 @@ class PluginRunner:
             return self.dissect_adapter.parse_evtx(
                 input_path, artifact.case_id, artifact.artifact_id, artifact.sha256
             )
-        elif atype in ("registry", "hive", "system", "software", "ntuser"):
+        elif atype in ("registry", "hive", "system", "software", "ntuser", "amcache"):
             return self.dissect_adapter.parse_registry_hive(
                 input_path, artifact.case_id, artifact.artifact_id, artifact.sha256
             )
@@ -450,6 +1041,7 @@ class PluginRunner:
                     source_artifact_id=artifact.artifact_id,
                     source_artifact_hash=artifact.sha256,
                     tool_id=plugin.tool_id,
+                    tool_version=plugin.version,
                     timestamp_utc=ts,
                     artifact_type=plugin.category,
                     category=plugin.category,

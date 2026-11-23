@@ -1,0 +1,157 @@
+[
+  {
+    "id": "SA-001",
+    "title": "Zero-Copy Offline Intake Allows Host Filesystem Traversal and Arbitrary Read",
+    "severity": "critical",
+    "confidence": "confirmed",
+    "affects": ["integrity", "confidentiality"],
+    "locations": [
+      "backend/app/api/intake.py:413",
+      "backend/app/api/intake.py:421"
+    ],
+    "status": "fixed"
+  },
+  {
+    "id": "SA-002",
+    "title": "Hardcoded Default Secret Key Allows HumanApprovalToken Forgery and Gate Bypass",
+    "severity": "critical",
+    "confidence": "confirmed",
+    "affects": ["defensibility", "integrity"],
+    "locations": [
+      "backend/app/models/workflow.py:139",
+      "backend/app/connectors/ssh_collector.py:401",
+      "backend/app/api/deps.py:121"
+    ],
+    "status": "fixed"
+  },
+  {
+    "id": "SA-003",
+    "title": "Silent Custody Verification Failure in ReportBuilder Defaults to False Positive Verification",
+    "severity": "critical",
+    "confidence": "confirmed",
+    "affects": ["defensibility", "integrity"],
+    "locations": [
+      "backend/app/agent/report_builder.py:424",
+      "backend/app/agent/report_builder.py:428"
+    ],
+    "status": "fixed"
+  },
+  {
+    "id": "SA-004",
+    "title": "Unauthenticated Case Disclosure and Missing Object-Level Access Control",
+    "severity": "high",
+    "confidence": "confirmed",
+    "affects": ["confidentiality"],
+    "locations": [
+      "backend/app/api/cases.py:29",
+      "backend/app/api/cases.py:67"
+    ],
+    "status": "fixed"
+  },
+  {
+    "id": "SA-005",
+    "title": "Unauthenticated LLM Co-Pilot and Arbitrary System Prompt Stripping",
+    "severity": "high",
+    "confidence": "confirmed",
+    "affects": ["confidentiality", "availability", "integrity"],
+    "locations": [
+      "backend/app/api/copilot.py:43",
+      "backend/app/api/copilot.py:95"
+    ],
+    "status": "fixed"
+  },
+  {
+    "id": "SA-006",
+    "title": "Evidence Boundary Breakout via Unescaped XML Delimiter in to_evidence_xml()",
+    "severity": "high",
+    "confidence": "confirmed",
+    "affects": ["integrity"],
+    "locations": [
+      "backend/app/models/findings.py:58",
+      "backend/app/models/findings.py:59"
+    ],
+    "status": "fixed"
+  },
+  {
+    "id": "SA-007",
+    "title": "Lack of Semantic Entity and Fact Matching in CitationGuard",
+    "severity": "high",
+    "confidence": "high",
+    "affects": ["defensibility", "integrity"],
+    "locations": [
+      "backend/app/core/citation_guard.py:49",
+      "backend/app/core/citation_guard.py:86"
+    ],
+    "status": "fixed"
+  },
+  {
+    "id": "SA-008",
+    "title": "Missing Server-Side Request Forgery (SSRF) Validation in SIEM Connectors",
+    "severity": "medium",
+    "confidence": "high",
+    "affects": ["confidentiality", "integrity"],
+    "locations": [
+      "backend/app/connectors/siem_connectors.py:105",
+      "backend/app/models/connectors.py:90"
+    ],
+    "status": "fixed"
+  },
+  {
+    "id": "SA-009",
+    "title": "Uncapped Streaming Evidence Upload Permits Disk Exhaustion Denial of Service",
+    "severity": "medium",
+    "confidence": "high",
+    "affects": ["availability"],
+    "locations": [
+      "backend/app/api/intake.py:230",
+      "backend/app/api/intake.py:240"
+    ],
+    "status": "fixed"
+  },
+  {
+    "id": "SA-010",
+    "title": "Sensitive Forensic Investigation State Persisted in Plaintext Browser LocalStorage",
+    "severity": "medium",
+    "confidence": "high",
+    "affects": ["confidentiality"],
+    "locations": [
+      "frontend/src/context/InvestigationContext.tsx:148"
+    ],
+    "status": "fixed"
+  },
+  {
+    "id": "SA-011",
+    "title": "Known Vulnerabilities in urllib3 Dependency (PYSEC-2026-4175, CVE-2026-97687)",
+    "severity": "low",
+    "confidence": "confirmed",
+    "affects": ["availability", "integrity"],
+    "locations": [
+      "poetry.lock:1",
+      "pyproject.toml:25"
+    ],
+    "status": "fixed"
+  },
+  {
+    "id": "SA-012",
+    "title": "Development Server Binds to All Network Interfaces by Default",
+    "severity": "low",
+    "confidence": "confirmed",
+    "affects": ["confidentiality"],
+    "locations": [
+      "backend/app/main.py:112"
+    ],
+    "status": "fixed"
+  },
+  {
+    "id": "SA-013",
+    "title": "Unauthenticated LLM Smoke Test Endpoint",
+    "severity": "low",
+    "confidence": "confirmed",
+    "affects": ["availability", "confidentiality"],
+    "locations": [
+      "backend/app/api/llm.py:44",
+      "backend/app/api/llm.py:59"
+    ],
+    "status": "fixed"
+  }
+]

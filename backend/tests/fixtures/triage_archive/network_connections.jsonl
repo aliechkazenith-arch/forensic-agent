@@ -1,0 +1,1 @@
+{"timestamp_utc": "2026-11-20T10:01:00Z", "process_name": "powershell.exe", "src_ip": "10.0.0.15", "src_port": 49822, "dest_ip": "198.51.100.42", "dest_port": 443, "protocol": "TCP", "state": "ESTABLISHED", "host": "WS-FINANCE-01"}

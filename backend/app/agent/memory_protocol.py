@@ -247,13 +247,24 @@ class SQLiteFeedbackMemoryProvider:
                     org_id TEXT,
                     artifact_type TEXT,
                     created_utc TEXT NOT NULL,
-                    corrected_query TEXT
+                    corrected_query TEXT,
+                    badge_id TEXT,
+                    analyst_role TEXT,
+                    analyst_username TEXT
                 );
                 """
             )
+            # Safe schema migrations for existing SQLite databases
+            for col, col_type in [("badge_id", "TEXT"), ("analyst_role", "TEXT"), ("analyst_username", "TEXT")]:
+                try:
+                    self._conn.execute(f"ALTER TABLE human_feedback ADD COLUMN {col} {col_type};")
+                except sqlite3.OperationalError:
+                    pass  # Column already exists
+
             self._conn.execute("CREATE INDEX IF NOT EXISTS idx_tr_case ON execution_traces(case_id);")
             self._conn.execute("CREATE INDEX IF NOT EXISTS idx_fb_org ON human_feedback(org_id);")
             self._conn.execute("CREATE INDEX IF NOT EXISTS idx_fb_scope ON human_feedback(scope);")
+            self._conn.execute("CREATE INDEX IF NOT EXISTS idx_fb_badge ON human_feedback(badge_id);")
 
     async def record_execution_trace(self, trace: NodeExecutionTrace) -> None:
         """Save a node execution trace."""
@@ -281,15 +292,16 @@ class SQLiteFeedbackMemoryProvider:
             )
 
     async def record_human_feedback(self, feedback: HumanFeedbackRecord) -> None:
-        """Save a human feedback record."""
+        """Save a human feedback record with authenticated investigator identity."""
         with self._conn:
             self._conn.execute(
                 """
                 INSERT OR REPLACE INTO human_feedback (
                     feedback_id, case_id, finding_id, feedback_type,
                     analyst_note, entity_pattern, scope, org_id,
-                    artifact_type, created_utc, corrected_query
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?);
+                    artifact_type, created_utc, corrected_query,
+                    badge_id, analyst_role, analyst_username
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?);
                 """,
                 (
                     feedback.feedback_id,
@@ -303,6 +315,9 @@ class SQLiteFeedbackMemoryProvider:
                     feedback.artifact_type,
                     feedback.created_utc,
                     feedback.corrected_query,
+                    feedback.badge_id,
+                    feedback.analyst_role,
+                    feedback.analyst_username,
                 ),
             )
 

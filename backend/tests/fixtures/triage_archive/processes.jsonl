@@ -1,0 +1,2 @@
+{"timestamp_utc": "2026-11-20T10:00:00Z", "process_name": "powershell.exe", "command_line": "powershell.exe -NoP -NonI -W Hidden -Enc SQBFAFgA...", "pid": 4812, "parent_pid": 1024, "user": "DOMAIN\\Administrator", "host": "WS-FINANCE-01"}
+{"timestamp_utc": "2026-11-20T10:05:00Z", "process_name": "rundll32.exe", "command_line": "rundll32.exe C:\\Temp\\payload.dll,StartW", "pid": 5920, "parent_pid": 4812, "user": "DOMAIN\\Administrator", "host": "WS-FINANCE-01"}

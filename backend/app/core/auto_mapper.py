@@ -225,3 +225,6 @@ class DryRunAutoMapper:
             total_columns_inspected=len(all_columns),
             detected_artifact_type=detected_artifact_type,
         )
+
+
+ToolAutoMapperService = DryRunAutoMapper

@@ -22,6 +22,37 @@ import duckdb
 from backend.app.core.exceptions import StorageError
 from backend.app.models.findings import FindingSeverity, ForensicFinding
 
+ALLOWED_FINDING_COLUMNS: Set[str] = {
+    "finding_id",
+    "case_id",
+    "source_artifact_id",
+    "source_artifact_hash",
+    "tool_id",
+    "tool_version",
+    "timestamp_utc",
+    "artifact_type",
+    "category",
+    "event_id",
+    "severity",
+    "host",
+    "user_name",
+    "user",
+    "process_name",
+    "command_line",
+    "raw_reference",
+    "summary",
+    "projected_data",
+    "raw_data_path",
+    "search_tokens",
+}
+
+
+FINDINGS_SELECT_COLS = (
+    "finding_id, case_id, source_artifact_id, source_artifact_hash, tool_id, tool_version, "
+    "timestamp_utc, artifact_type, category, event_id, severity, host, user_name, "
+    "process_name, command_line, raw_reference, summary, projected_data, raw_data_path, search_tokens"
+)
+
 
 class ForensicStore:
     """DuckDB-backed forensic data store for structured findings."""
@@ -51,6 +82,7 @@ class ForensicStore:
                 source_artifact_id VARCHAR NOT NULL,
                 source_artifact_hash VARCHAR NOT NULL,
                 tool_id VARCHAR NOT NULL,
+                tool_version VARCHAR,
                 timestamp_utc VARCHAR,
                 artifact_type VARCHAR NOT NULL,
                 category VARCHAR NOT NULL,
@@ -68,6 +100,10 @@ class ForensicStore:
             );
             """
         )
+        try:
+            self._conn.execute("ALTER TABLE findings ADD COLUMN IF NOT EXISTS tool_version VARCHAR;")
+        except Exception:
+            pass
         # Create indexes for fast lookup and pivoting
         self._conn.execute("CREATE INDEX IF NOT EXISTS idx_fnd_case ON findings(case_id);")
         self._conn.execute("CREATE INDEX IF NOT EXISTS idx_fnd_host ON findings(host);")
@@ -96,27 +132,77 @@ class ForensicStore:
     @staticmethod
     def _row_to_finding(row: Tuple[Any, ...]) -> ForensicFinding:
         """Convert a database tuple row to a ForensicFinding instance."""
-        (
-            finding_id,
-            case_id,
-            source_artifact_id,
-            source_artifact_hash,
-            tool_id,
-            timestamp_utc,
-            artifact_type,
-            category,
-            event_id,
-            severity,
-            host,
-            user_name,
-            process_name,
-            command_line,
-            raw_reference,
-            summary,
-            projected_data_str,
-            raw_data_path,
-            _,
-        ) = row
+        tool_version = None
+        if len(row) >= 20:
+            # Detect whether row[5] is timestamp_utc (legacy altered table) or tool_version
+            if isinstance(row[5], str) and ("T" in row[5] or ":" in row[5]) and not (isinstance(row[6], str) and ("T" in row[6] or ":" in row[6])):
+                (
+                    finding_id,
+                    case_id,
+                    source_artifact_id,
+                    source_artifact_hash,
+                    tool_id,
+                    timestamp_utc,
+                    artifact_type,
+                    category,
+                    event_id,
+                    severity,
+                    host,
+                    user_name,
+                    process_name,
+                    command_line,
+                    raw_reference,
+                    summary,
+                    projected_data_str,
+                    raw_data_path,
+                    _,
+                    tool_version,
+                ) = row[:20]
+            else:
+                (
+                    finding_id,
+                    case_id,
+                    source_artifact_id,
+                    source_artifact_hash,
+                    tool_id,
+                    tool_version,
+                    timestamp_utc,
+                    artifact_type,
+                    category,
+                    event_id,
+                    severity,
+                    host,
+                    user_name,
+                    process_name,
+                    command_line,
+                    raw_reference,
+                    summary,
+                    projected_data_str,
+                    raw_data_path,
+                    _,
+                ) = row[:20]
+        else:
+            (
+                finding_id,
+                case_id,
+                source_artifact_id,
+                source_artifact_hash,
+                tool_id,
+                timestamp_utc,
+                artifact_type,
+                category,
+                event_id,
+                severity,
+                host,
+                user_name,
+                process_name,
+                command_line,
+                raw_reference,
+                summary,
+                projected_data_str,
+                raw_data_path,
+                _,
+            ) = row
 
         projected_data = {}
         if projected_data_str:
@@ -131,6 +217,7 @@ class ForensicStore:
             source_artifact_id=source_artifact_id,
             source_artifact_hash=source_artifact_hash,
             tool_id=tool_id,
+            tool_version=tool_version,
             timestamp_utc=timestamp_utc,
             artifact_type=artifact_type,
             category=category,
@@ -162,6 +249,7 @@ class ForensicStore:
                     f.source_artifact_id,
                     f.source_artifact_hash,
                     f.tool_id,
+                    f.tool_version,
                     f.timestamp_utc,
                     f.artifact_type,
                     f.category,
@@ -183,11 +271,11 @@ class ForensicStore:
             self._conn.executemany(
                 """
                 INSERT OR REPLACE INTO findings (
-                    finding_id, case_id, source_artifact_id, source_artifact_hash, tool_id,
+                    finding_id, case_id, source_artifact_id, source_artifact_hash, tool_id, tool_version,
                     timestamp_utc, artifact_type, category, event_id, severity,
                     host, user_name, process_name, command_line, raw_reference,
                     summary, projected_data, raw_data_path, search_tokens
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?);
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?);
                 """,
                 rows,
             )
@@ -195,18 +283,32 @@ class ForensicStore:
         except Exception as e:
             raise StorageError(f"Failed to batch insert findings: {e}") from e
 
-    def get_finding(self, finding_id: str) -> Optional[ForensicFinding]:
-        """Retrieve a single finding by finding_id."""
-        cursor = self._conn.execute("SELECT * FROM findings WHERE finding_id = ? LIMIT 1;", [finding_id])
+    def get_finding(self, finding_id: str, case_id: Optional[str] = None) -> Optional[ForensicFinding]:
+        """Retrieve a single finding by finding_id, optionally scoped to a specific case_id."""
+        if case_id:
+            cursor = self._conn.execute(
+                f"SELECT {FINDINGS_SELECT_COLS} FROM findings WHERE finding_id = ? AND case_id = ? LIMIT 1;",
+                [finding_id, case_id],
+            )
+        else:
+            cursor = self._conn.execute(
+                f"SELECT {FINDINGS_SELECT_COLS} FROM findings WHERE finding_id = ? LIMIT 1;",
+                [finding_id],
+            )
         row = cursor.fetchone()
         return self._row_to_finding(row) if row else None
 
-    def get_findings_by_ids(self, finding_ids: List[str]) -> List[ForensicFinding]:
-        """Retrieve multiple findings by IDs."""
+    def get_findings_by_ids(self, finding_ids: List[str], case_id: Optional[str] = None) -> List[ForensicFinding]:
+        """Retrieve multiple findings by IDs, optionally scoped to a specific case_id."""
         if not finding_ids:
             return []
         placeholders = ", ".join(["?"] * len(finding_ids))
-        cursor = self._conn.execute(f"SELECT * FROM findings WHERE finding_id IN ({placeholders});", finding_ids)
+        sql = f"SELECT {FINDINGS_SELECT_COLS} FROM findings WHERE finding_id IN ({placeholders})"
+        params: List[Any] = list(finding_ids)
+        if case_id:
+            sql += " AND case_id = ?"
+            params.append(case_id)
+        cursor = self._conn.execute(sql, params)
         return [self._row_to_finding(r) for r in cursor.fetchall()]
 
     def check_citations_exist(
@@ -266,6 +368,9 @@ class ForensicStore:
         where_clauses: List[str] = []
         params: List[Any] = []
 
+        if order_by not in ALLOWED_FINDING_COLUMNS:
+            raise StorageError(f"Invalid or unauthorized order_by column: '{order_by}'")
+
         if case_id:
             where_clauses.append("case_id = ?")
             params.append(case_id)
@@ -274,6 +379,8 @@ class ForensicStore:
             for field, val in filters.items():
                 if val is None:
                     continue
+                if field not in ALLOWED_FINDING_COLUMNS:
+                    raise StorageError(f"Invalid or unauthorized filter field: '{field}'")
                 db_col = "user_name" if field == "user" else field
                 if isinstance(val, (list, tuple, set)):
                     if not val:
@@ -328,7 +435,7 @@ class ForensicStore:
         col_name = "user_name" if order_by == "user" else order_by
         direction = "ASC" if ascending else "DESC"
 
-        sql = f"SELECT * FROM findings {where_stmt} ORDER BY {col_name} {direction} LIMIT ? OFFSET ?;"
+        sql = f"SELECT {FINDINGS_SELECT_COLS} FROM findings {where_stmt} ORDER BY {col_name} {direction} LIMIT ? OFFSET ?;"
         params.extend([limit, offset])
 
         try:
@@ -361,8 +468,8 @@ class ForensicStore:
         min_ts = min_dt.isoformat()
         max_ts = max_dt.isoformat()
 
-        sql = """
-            SELECT * FROM findings
+        sql = f"""
+            SELECT {FINDINGS_SELECT_COLS} FROM findings
             WHERE case_id = ?
               AND timestamp_utc IS NOT NULL
               AND timestamp_utc >= ?
@@ -417,7 +524,7 @@ class ForensicStore:
         where_clauses.append(f"({' OR '.join(token_clauses)})")
         where_stmt = f"WHERE {' AND '.join(where_clauses)}"
 
-        sql = f"SELECT * FROM findings {where_stmt} LIMIT 300;"
+        sql = f"SELECT {FINDINGS_SELECT_COLS} FROM findings {where_stmt} LIMIT 300;"
         try:
             cursor = self._conn.execute(sql, params)
             rows = cursor.fetchall()
@@ -477,9 +584,13 @@ class ForensicStore:
         params = []
 
         if case_id:
+            if not re.match(r"^[a-zA-Z0-9_-]+$", case_id):
+                raise StorageError(f"Invalid case_id format: '{case_id}'")
             where_clauses.append(f"case_id = '{case_id}'")
 
         for k, v in query_filter.items():
+            if k not in ALLOWED_FINDING_COLUMNS:
+                raise StorageError(f"Invalid or unauthorized column in query_filter: '{k}'")
             col = "user_name" if k == "user" else k
             if isinstance(v, str):
                 escaped = v.replace("'", "''")

@@ -1,0 +1,2 @@
+{"timestamp_utc": "2026-11-20T09:50:00Z", "process_name": "services.exe", "command_line": "C:\\Windows\\system32\\services.exe", "pid": 1024, "parent_pid": 600, "user": "NT AUTHORITY\\SYSTEM", "host": "WS-CORP-FINANCE"}
+{"timestamp_utc": "2026-11-20T10:02:00Z", "process_name": "updater.exe", "command_line": "C:\\Users\\Public\\updater.exe -d", "pid": 4120, "parent_pid": 1024, "user": "NT AUTHORITY\\SYSTEM", "host": "WS-CORP-FINANCE"}

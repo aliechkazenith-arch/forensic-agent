@@ -1,4 +1,54 @@
 # ForensicOps AI — User Interface & Frontend Specification
+## 0. Multi-User RBAC Login & Session Gate (`AuthGate.tsx`)
+
+Before accessing the 3-Mode Environment Wizard (`EnvironmentWizard.tsx`) or other operational views, unauthenticated users are routed through the session gate in `AuthGate.tsx`:
+
+### A. First-Boot Admin Setup Form
+- **Trigger:** Rendered automatically if `GET /api/auth/status` indicates the SQLite `users` table is empty (`initialized: false`).
+- **Fields:**
+  - `Username` (e.g. `lead_admin`)
+  - `Badge ID` (e.g. `BADGE-001`, alphanumeric DFIR credential ID)
+  - `Full Name` (e.g. `Chief DFIR Investigator`)
+  - `Master Password` & `Confirm Password` (hashed with `bcrypt`)
+- **Action:** Submits to `POST /api/auth/setup` to create the initial `lead_investigator` account, immediately issues a JWT token, and proceeds to Case Selection.
+
+### B. Investigator Login Card
+- **Trigger:** Rendered when `initialized: true` and no valid JWT access token exists in `localStorage`.
+- **Fields:** `Username / Badge ID` and `Password`.
+- **Case Selection Dropdown:** Upon successful authentication, prompts the investigator to select an active case (or initialize a new Case ID) before mounting the main operational shell.
+
+### C. Top Navigation Identity Bar (`Navbar.tsx`)
+- Displays the active investigator's identity in the top-right header:
+  - **Badge ID Pill:** `Badge: BADGE-XXX`
+  - **Role Badge Chip:**
+    - `lead_investigator`: `LEAD` (purple/gold gradient badge with crown/shield icon)
+    - `soc_analyst`: `SOC ANALYST` (cyan/sky blue badge with terminal/zap icon)
+    - `auditor`: `AUDITOR` (amber/slate badge with balance/eye icon)
+  - **Manage Users Button:** Visible only to `lead_investigator`; opens `UserManagementModal.tsx`.
+  - **Lock / Sign Out Button:** Clears JWT from storage, resets active state, and redirects to `AuthGate.tsx`.
+
+### D. Lead User Management Modal (`UserManagementModal.tsx`)
+- Accessible exclusively by `lead_investigator`.
+- **User List Table:** Displays `Username`, `Badge ID`, `Role`, `Full Name`, `Created UTC`, and `Status (Active / Suspended)`.
+- **Create User Form:** Allows Lead to register new `soc_analyst` and `auditor` accounts with unique `badge_id` and initial passwords.
+- **Account Actions:** Toggle `Active / Suspended` status via `PATCH /api/auth/users/{user_id}/status`.
+
+### E. Role-Based Permissions Matrix
+
+| Feature / UI Component | `lead_investigator` | `soc_analyst` | `auditor` |
+| :--- | :---: | :---: | :---: |
+| **First-Boot Admin Setup** | Initialized Once | N/A | N/A |
+| **User Management (`UserManagementModal.tsx`)** | Full Access | Hidden / 403 | Hidden / 403 |
+| **Offline Evidence Intake (`EnvironmentWizard.tsx`)** | Allowed | Allowed | Read-Only |
+| **Online Collector Dispatch (`Invoke-ForensicCollector`)** | Direct Approval | Request Lead Approval | Hidden / Blocked |
+| **Workflow Studio (`WorkflowCanvas.tsx`)** | Edit & Run | Edit & Run | Read-Only (Run Button Hidden) |
+| **Custom Tool Onboarding (`PluginManagerModal.tsx`)** | Allowed | Allowed | Hidden |
+| **Cited Report Viewer (`CitedReportViewer.tsx`)** | Full View | Full View | Full View |
+| **Human Feedback Micro-Controls (`[👍 TP] / [🛡️ Benign]`)** | Enabled | Enabled | Hidden / Read-Only |
+| **Cryptographic Custody Ledger (`CustodyLedgerModal.tsx`)** | Full View & Verify | Full View & Verify | Full View & Verify (Primary Role) |
+| **Ledger Actor Attribution** | `actor: user (badge) [LEAD]` | `actor: user (badge) [ANALYST]` | N/A (Auditor cannot mutate) |
+
+---
 
 ## 1. Tech Stack
 - React 18 + TypeScript + Vite + Tailwind CSS + **React Flow** (n8n-style workflow canvas) + Zustand.

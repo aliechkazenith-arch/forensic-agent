@@ -50,3 +50,7 @@ class HumanFeedbackRecord(BaseModel):
     artifact_type: Optional[str] = None
     created_utc: str = Field(default_factory=lambda: datetime.now(timezone.utc).isoformat())
     corrected_query: Optional[str] = None
+    badge_id: Optional[str] = None
+    analyst_role: Optional[str] = None
+    analyst_username: Optional[str] = None
+
